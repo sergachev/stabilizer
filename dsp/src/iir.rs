@@ -24,6 +24,7 @@ fn copysign(x: f32, y: f32) -> f32 {
     }
 }
 
+#[cfg(not(feature = "nightly"))]
 fn max(x: f32, y: f32) -> f32 {
     if x > y {
         x
@@ -32,12 +33,37 @@ fn max(x: f32, y: f32) -> f32 {
     }
 }
 
+#[cfg(not(feature = "nightly"))]
 fn min(x: f32, y: f32) -> f32 {
     if x < y {
         x
     } else {
         y
     }
+}
+
+#[cfg(feature = "nightly")]
+fn max(x: f32, y: f32) -> f32 {
+    let o: f32;
+    unsafe {
+        asm!("vmaxnm.f32 {}, {}, {}",
+            lateout(sreg) o, in(sreg) x, in(sreg) y,
+            options(pure, nomem, nostack, preserves_flags)
+        );
+    }
+    o
+}
+
+#[cfg(feature = "nightly")]
+fn min(x: f32, y: f32) -> f32 {
+    let o: f32;
+    unsafe {
+        asm!("vminnm.f32 {}, {}, {}",
+            lateout(sreg) o, in(sreg) x, in(sreg) y,
+            options(pure, nomem, nostack, preserves_flags)
+        );
+    }
+    o
 }
 
 // Multiply-accumulate vectors `x` and `a`.
@@ -159,10 +185,13 @@ impl IIR {
     /// * `xy` - Current filter state.
     /// * `x0` - New input.
     pub fn update(&self, xy: &mut IIRState, x0: f32) -> f32 {
+        let n = self.ba.len();
+        debug_assert!(xy.len() == n);
         // `xy` contains       x0 x1 y0 y1 y2
         // Increment time      x1 x2 y1 y2 y3
-        // Rotate              y3 x1 x2 y1 y2
-        xy.rotate_right(1);
+        // Shift               x1 x1 x2 y1 y2
+        // This unrolls better than xy.rotate_right(1)
+        xy.copy_within(0..n - 1, 1);
         // Store x0            x0 x1 x2 y1 y2
         xy[0] = x0;
         // Compute y0 by multiply-accumulate
@@ -170,7 +199,7 @@ impl IIR {
         // Limit y0
         let y0 = max(self.y_min, min(self.y_max, y0));
         // Store y0            x0 x1 y0 y1 y2
-        xy[xy.len() / 2] = y0;
+        xy[n / 2] = y0;
         y0
     }
 }
