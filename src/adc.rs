@@ -29,8 +29,8 @@ static mut SPI_START: [u16; 1] = [0x00];
 // processed). Note that the contents of AXI SRAM is uninitialized, so the buffer contents on
 // startup are undefined. The dimension are `ADC_BUF[adc_index][ping_pong_index][sample_index]`.
 #[link_section = ".axisram.buffers"]
-static mut ADC_BUF: [[[u16; SAMPLE_BUFFER_SIZE]; 2]; 2] =
-    [[[0; SAMPLE_BUFFER_SIZE]; 2]; 2];
+static mut ADC_BUF: [[[u16; SAMPLE_BUFFER_SIZE]; 3]; 2] =
+    [[[0; SAMPLE_BUFFER_SIZE]; 3]; 2];
 
 macro_rules! adc_input {
     ($name:ident, $index:literal, $trigger_stream:ident, $data_stream:ident,
@@ -61,11 +61,11 @@ macro_rules! adc_input {
 
             /// Whenever the DMA request occurs, it should write into SPI's TX FIFO to start a DMA
             /// transfer.
-            fn address(&self) -> u32 {
+            fn address(&self) -> usize {
                 // Note(unsafe): It is assumed that SPI is owned by another DMA transfer and this DMA is
                 // only used for the transmit-half of DMA.
                 let regs = unsafe { &*hal::stm32::$spi::ptr() };
-                &regs.txdr as *const _ as u32
+                &regs.txdr as *const _ as _
             }
         }
 
@@ -137,6 +137,7 @@ macro_rules! adc_input {
                 // after the requested number of samples have been collected. Note that only ADC1's (sic!)
                 // data stream is used to trigger a transfer completion interrupt.
                 let data_config = DmaConfig::default()
+                    .double_buffer(true)
                     .memory_increment(true)
                     .transfer_complete_interrupt($index == 1)
                     .priority(Priority::VeryHigh);
@@ -157,7 +158,7 @@ macro_rules! adc_input {
                         // Note(unsafe): The ADC_BUF[$index][0] is "owned" by this peripheral.
                         // It shall not be used anywhere else in the module.
                         unsafe { &mut ADC_BUF[$index][0] },
-                        None,
+                        Some(unsafe { &mut ADC_BUF[$index][1] }),
                         data_config,
                     );
 
@@ -176,7 +177,7 @@ macro_rules! adc_input {
                 Self {
                     // Note(unsafe): The ADC_BUF[$index][1] is "owned" by this peripheral. It shall not be used
                     // anywhere else in the module.
-                    next_buffer: unsafe { Some(&mut ADC_BUF[$index][1]) },
+                    next_buffer: unsafe { Some(&mut ADC_BUF[$index][2]) },
                     transfer: data_transfer,
                     _trigger_transfer: trigger_transfer,
                 }
