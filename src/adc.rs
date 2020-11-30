@@ -15,7 +15,8 @@
 ///! busy-waiting because the transfers should complete at approximately the same time.
 use super::{
     hal, sampling_timer, DMAReq, DmaConfig, MemoryToPeripheral,
-    PeripheralToMemory, Priority, TargetAddress, Transfer, SAMPLE_BUFFER_SIZE,
+    PeripheralToMemory, Priority, SampleBuffer, TargetAddress, Transfer,
+    SAMPLE_BUFFER_SIZE,
 };
 
 // The following data is written by the timer ADC sample trigger into each of the SPI TXFIFOs. Note
@@ -29,8 +30,7 @@ static mut SPI_START: [u16; 1] = [0x00];
 // processed). Note that the contents of AXI SRAM is uninitialized, so the buffer contents on
 // startup are undefined. The dimension are `ADC_BUF[adc_index][ping_pong_index][sample_index]`.
 #[link_section = ".axisram.buffers"]
-static mut ADC_BUF: [[[u16; SAMPLE_BUFFER_SIZE]; 3]; 2] =
-    [[[0; SAMPLE_BUFFER_SIZE]; 3]; 2];
+static mut ADC_BUF: [[SampleBuffer; 3]; 2] = [[[0; SAMPLE_BUFFER_SIZE]; 3]; 2];
 
 macro_rules! adc_input {
     ($name:ident, $index:literal, $trigger_stream:ident, $data_stream:ident,
@@ -71,12 +71,12 @@ macro_rules! adc_input {
 
         /// Represents data associated with ADC.
         pub struct $name {
-            next_buffer: Option<&'static mut [u16; SAMPLE_BUFFER_SIZE]>,
+            next_buffer: Option<&'static mut SampleBuffer>,
             transfer: Transfer<
                 hal::dma::dma::$data_stream<hal::stm32::DMA1>,
                 hal::spi::Spi<hal::stm32::$spi, hal::spi::Disabled, u16>,
                 PeripheralToMemory,
-                &'static mut [u16; SAMPLE_BUFFER_SIZE],
+                &'static mut SampleBuffer,
             >,
             _trigger_transfer: Transfer<
                 hal::dma::dma::$trigger_stream<hal::stm32::DMA1>,
@@ -138,6 +138,7 @@ macro_rules! adc_input {
                 // data stream is used to trigger a transfer completion interrupt.
                 let data_config = DmaConfig::default()
                     .double_buffer(true)
+                    .circular_buffer(true)
                     .memory_increment(true)
                     .transfer_complete_interrupt($index == 1)
                     .priority(Priority::VeryHigh);
@@ -183,37 +184,20 @@ macro_rules! adc_input {
                 }
             }
 
-            /// Obtain a buffer filled with ADC samples.
-            ///
-            /// # Returns
-            /// A reference to the underlying buffer that has been filled with ADC samples.
-            pub fn acquire_buffer(
-                &mut self,
-            ) -> &'static mut [u16; SAMPLE_BUFFER_SIZE] {
-                // Wait for the transfer to fully complete before continuing.
-                // Note: If a device hangs up, check that this conditional is passing correctly, as there is
-                // no time-out checks here in the interest of execution speed.
-                while !self.transfer.get_transfer_complete_flag() {}
-
-                let next_buffer = self.next_buffer.take().unwrap();
-
-                // Start the next transfer.
-                self.transfer.clear_interrupts();
-                let (prev_buffer, _) =
-                    self.transfer.next_transfer(next_buffer).unwrap();
-
-                prev_buffer
-            }
-
-            /// Release a buffer of ADC samples to the pool.
-            ///
-            /// # Args
-            /// * `next_buffer` - Buffer of ADC samples to be re-used.
-            pub fn release_buffer(
-                &mut self,
-                next_buffer: &'static mut [u16; SAMPLE_BUFFER_SIZE],
-            ) {
-                self.next_buffer.replace(next_buffer); // .unwrap_none() https://github.com/rust-lang/rust/issues/62633
+            /// Acquire the next output buffer to populate it with DAC codes.
+            pub fn process<F>(&mut self, f: F)
+            where
+                F: FnOnce(
+                    &'static mut SampleBuffer,
+                ) -> &'static mut SampleBuffer,
+            {
+                // if self.first_transfer {
+                //     self.first_transfer = false
+                // } else {
+                //     while !self.transfer.get_transfer_complete_flag() {}
+                // }
+                // self.transfer.clear_interrupts();
+                unsafe { self.transfer.next_transfer_with(|b, _| (f(b), ())) };
             }
         }
     };

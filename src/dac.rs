@@ -4,8 +4,8 @@
 ///! configured to generate a DMA write into the SPI TXFIFO, which initiates a SPI transfer and
 ///! results in DAC update for both channels.
 use super::{
-    hal, sampling_timer, DMAReq, DmaConfig, MemoryToPeripheral, TargetAddress,
-    Transfer, SAMPLE_BUFFER_SIZE,
+    hal, sampling_timer, DMAReq, DmaConfig, MemoryToPeripheral, SampleBuffer,
+    TargetAddress, Transfer, SAMPLE_BUFFER_SIZE,
 };
 
 // The following global buffers are used for the DAC code DMA transfers. Two buffers are used for
@@ -13,8 +13,7 @@ use super::{
 // processed). Note that the contents of AXI SRAM is uninitialized, so the buffer contents on
 // startup are undefined. The dimension are `ADC_BUF[adc_index][ping_pong_index][sample_index]`.
 #[link_section = ".axisram.buffers"]
-static mut DAC_BUF: [[[u16; SAMPLE_BUFFER_SIZE]; 3]; 2] =
-    [[[0; SAMPLE_BUFFER_SIZE]; 3]; 2];
+static mut DAC_BUF: [[SampleBuffer; 2]; 2] = [[[0; SAMPLE_BUFFER_SIZE]; 2]; 2];
 
 macro_rules! dac_output {
     ($name:ident, $index:literal, $data_stream:ident,
@@ -52,13 +51,12 @@ macro_rules! dac_output {
 
         /// Represents data associated with DAC.
         pub struct $name {
-            next_buffer: Option<&'static mut [u16; SAMPLE_BUFFER_SIZE]>,
             // Note: SPI TX functionality may not be used from this structure to ensure safety with DMA.
             transfer: Transfer<
                 hal::dma::dma::$data_stream<hal::stm32::DMA1>,
                 $spi,
                 MemoryToPeripheral,
-                &'static mut [u16; SAMPLE_BUFFER_SIZE],
+                &'static mut SampleBuffer,
             >,
             first_transfer: bool,
         }
@@ -83,6 +81,7 @@ macro_rules! dac_output {
                 // The stream constantly writes to the TX FIFO to write new update codes.
                 let trigger_config = DmaConfig::default()
                     .double_buffer(true)
+                    .circular_buffer(true)
                     .memory_increment(true)
                     .peripheral_increment(false);
 
@@ -112,43 +111,24 @@ macro_rules! dac_output {
                 Self {
                     transfer,
                     // Note(unsafe): This buffer is only used once and provided for the next DMA transfer.
-                    next_buffer: unsafe { Some(&mut DAC_BUF[$index][2]) },
                     first_transfer: true,
                 }
             }
 
             /// Acquire the next output buffer to populate it with DAC codes.
-            pub fn acquire_buffer(
-                &mut self,
-            ) -> &'static mut [u16; SAMPLE_BUFFER_SIZE] {
-                self.next_buffer.take().unwrap()
-            }
-
-            /// Enqueue the next buffer for transmission to the DAC.
-            ///
-            /// # Args
-            /// * `data` - The next data to write to the DAC.
-            pub fn release_buffer(
-                &mut self,
-                next_buffer: &'static mut [u16; SAMPLE_BUFFER_SIZE],
-            ) {
-                // If the last transfer was not complete, we didn't write all our previous DAC codes.
-                // Wait for all the DAC codes to get written as well.
-                if self.first_transfer {
-                    self.first_transfer = false
-                } else {
-                    // Note: If a device hangs up, check that this conditional is passing correctly, as
-                    // there is no time-out checks here in the interest of execution speed.
-                    while !self.transfer.get_transfer_complete_flag() {}
-                }
-
-                // Start the next transfer.
-                self.transfer.clear_interrupts();
-                let (prev_buffer, _) =
-                    self.transfer.next_transfer(next_buffer).unwrap();
-
-                // .unwrap_none() https://github.com/rust-lang/rust/issues/62633
-                self.next_buffer.replace(prev_buffer);
+            pub fn process<F>(&mut self, f: F)
+            where
+                F: FnOnce(
+                    &'static mut SampleBuffer,
+                ) -> &'static mut SampleBuffer,
+            {
+                // if self.first_transfer {
+                //     self.first_transfer = false
+                // } else {
+                //     while !self.transfer.get_transfer_complete_flag() {}
+                // }
+                // self.transfer.clear_interrupts();
+                unsafe { self.transfer.next_transfer_with(|b, _| (f(b), ())) };
             }
         }
     };
