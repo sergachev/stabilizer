@@ -58,7 +58,6 @@ macro_rules! dac_output {
                 MemoryToPeripheral,
                 &'static mut SampleBuffer,
             >,
-            first_transfer: bool,
         }
 
         impl $name {
@@ -108,27 +107,21 @@ macro_rules! dac_output {
                         trigger_config,
                     );
 
-                Self {
-                    transfer,
-                    // Note(unsafe): This buffer is only used once and provided for the next DMA transfer.
-                    first_transfer: true,
-                }
+                Self { transfer }
             }
 
             /// Acquire the next output buffer to populate it with DAC codes.
-            pub fn process<F>(&mut self, f: F)
+            pub fn process<F>(&mut self, func: F)
             where
                 F: FnOnce(
                     &'static mut SampleBuffer,
                 ) -> &'static mut SampleBuffer,
             {
-                // if self.first_transfer {
-                //     self.first_transfer = false
-                // } else {
-                //     while !self.transfer.get_transfer_complete_flag() {}
-                // }
+                // while !self.transfer.get_transfer_complete_flag() {}
                 // self.transfer.clear_interrupts();
-                unsafe { self.transfer.next_transfer_with(|b, _| (f(b), ())) };
+                self.transfer
+                    .next_transfer_with(|buf, _| (func(buf), ()))
+                    .unwrap()
             }
         }
     };

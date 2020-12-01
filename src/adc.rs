@@ -30,7 +30,7 @@ static mut SPI_START: [u16; 1] = [0x00];
 // processed). Note that the contents of AXI SRAM is uninitialized, so the buffer contents on
 // startup are undefined. The dimension are `ADC_BUF[adc_index][ping_pong_index][sample_index]`.
 #[link_section = ".axisram.buffers"]
-static mut ADC_BUF: [[SampleBuffer; 3]; 2] = [[[0; SAMPLE_BUFFER_SIZE]; 3]; 2];
+static mut ADC_BUF: [[SampleBuffer; 2]; 2] = [[[0; SAMPLE_BUFFER_SIZE]; 2]; 2];
 
 macro_rules! adc_input {
     ($name:ident, $index:literal, $trigger_stream:ident, $data_stream:ident,
@@ -71,7 +71,6 @@ macro_rules! adc_input {
 
         /// Represents data associated with ADC.
         pub struct $name {
-            next_buffer: Option<&'static mut SampleBuffer>,
             transfer: Transfer<
                 hal::dma::dma::$data_stream<hal::stm32::DMA1>,
                 hal::spi::Spi<hal::stm32::$spi, hal::spi::Disabled, u16>,
@@ -176,28 +175,23 @@ macro_rules! adc_input {
                 trigger_transfer.start(|_| {});
 
                 Self {
-                    // Note(unsafe): The ADC_BUF[$index][1] is "owned" by this peripheral. It shall not be used
-                    // anywhere else in the module.
-                    next_buffer: unsafe { Some(&mut ADC_BUF[$index][2]) },
                     transfer: data_transfer,
                     _trigger_transfer: trigger_transfer,
                 }
             }
 
             /// Acquire the next output buffer to populate it with DAC codes.
-            pub fn process<F>(&mut self, f: F)
+            pub fn process<F>(&mut self, func: F)
             where
                 F: FnOnce(
                     &'static mut SampleBuffer,
                 ) -> &'static mut SampleBuffer,
             {
-                // if self.first_transfer {
-                //     self.first_transfer = false
-                // } else {
-                //     while !self.transfer.get_transfer_complete_flag() {}
-                // }
+                // while !self.transfer.get_transfer_complete_flag() {}
                 // self.transfer.clear_interrupts();
-                unsafe { self.transfer.next_transfer_with(|b, _| (f(b), ())) };
+                self.transfer
+                    .next_transfer_with(|buf, _| (func(buf), ()))
+                    .unwrap()
             }
         }
     };

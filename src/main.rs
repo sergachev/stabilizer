@@ -60,6 +60,8 @@ const SAMPLE_FREQUENCY_KHZ: u32 = 500;
 // The desired ADC sample processing buffer size.
 const SAMPLE_BUFFER_SIZE: usize = 1;
 
+type SampleBuffer = [u16; SAMPLE_BUFFER_SIZE];
+
 #[link_section = ".sram3.eth"]
 static mut DES_RING: ethernet::DesRing = ethernet::DesRing::new();
 
@@ -749,33 +751,47 @@ const APP: () = {
 
     #[task(binds=DMA1_STR3, resources=[adcs, dacs, iir_state, iir_ch], priority=2)]
     fn process(c: process::Context) {
-        let adc_samples = [
-            c.resources.adcs.0.acquire_buffer(),
-            c.resources.adcs.1.acquire_buffer(),
-        ];
-        let dac_samples = [
-            c.resources.dacs.0.acquire_buffer(),
-            c.resources.dacs.1.acquire_buffer(),
-        ];
-
-        for channel in 0..adc_samples.len() {
-            for sample in 0..adc_samples[0].len() {
-                let x = f32::from(adc_samples[channel][sample] as i16);
-                let y = c.resources.iir_ch[channel]
-                    .update(&mut c.resources.iir_state[channel], x);
-                // Note(unsafe): The filter limits ensure that the value is in range.
-                // The truncation introduces 1/2 LSB distortion.
-                let y = unsafe { y.to_int_unchecked::<i16>() };
-                // Convert to DAC code
-                dac_samples[channel][sample] = y as u16 ^ 0x8000;
-            }
-        }
-        let [adc0, adc1] = adc_samples;
-        c.resources.adcs.0.release_buffer(adc0);
-        c.resources.adcs.0.release_buffer(adc1);
-        let [dac0, dac1] = dac_samples;
-        c.resources.dacs.0.release_buffer(dac0);
-        c.resources.dacs.1.release_buffer(dac1);
+        let iir_state = c.resources.iir_state;
+        let iir_ch = c.resources.iir_ch;
+        let (adc0, adc1) = c.resources.adcs;
+        let (dac0, dac1) = c.resources.dacs;
+        adc0.process(|adc0| {
+            adc1.process(|adc1| {
+                dac0.process(|dac0| {
+                    dac1.process(|dac1| {
+                        for channel in 0..2 {
+                            for sample in 0..adc0.len() {
+                                let x = f32::from(match channel {
+                                    0 => adc0[sample],
+                                    1 => adc1[sample],
+                                    _ => 0,
+                                }
+                                    as i16);
+                                let y = iir_ch[channel].update(
+                                    &mut iir_state[channel],
+                                    x,
+                                );
+                                // NOTE(unsafe): The filter limits ensure that the value is in range.
+                                // The truncation introduces 1/2 LSB distortion.
+                                let y = unsafe { y.to_int_unchecked::<i16>() }
+                                    as u16
+                                    ^ 0x8000;
+                                // Convert to DAC code
+                                match channel {
+                                    0 => dac0[sample] = y,
+                                    1 => dac1[sample] = y,
+                                    _ => {}
+                                }
+                            }
+                        }
+                        dac1
+                    });
+                    dac0
+                });
+                adc1
+            });
+            adc0
+        });
     }
 
     #[idle(resources=[net_interface, pounder, mac_addr, eth_mac, iir_state, iir_ch, afes])]
